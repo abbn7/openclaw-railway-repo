@@ -14,7 +14,7 @@ dotenv.config();
 // Configuration
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // User will need to add this
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const PORT = process.env.PORT || 18789;
 
 if (!GROQ_API_KEY || !TELEGRAM_BOT_TOKEN) {
@@ -27,15 +27,19 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
 const conversations = new Map();
 
-// System Prompt for AI Developer
-const SYSTEM_PROMPT = `You are OpenClaw AI Developer, a close friend and expert coder.
-Rules:
-1. BE EXTREMELY CONCISE. Short, "bro-style" responses. No long paragraphs.
-2. Manage GitHub (Create, Update, Upload) and ZIP files.
-3. Modify code as requested.
-4. Remember everything.
-5. Credit "abbn7" briefly.
-6. Talk like a friend (Arabic/English mix is fine).`;
+// System Prompt for Deep Thinking & Realistic Developer
+const SYSTEM_PROMPT = `You are OpenClaw AI Developer, a REALISTIC and HONEST software engineer.
+Core Personality:
+1. NEVER LIE. If you haven't performed an action (like uploading to GitHub), NEVER say you did.
+2. DEEP THINKING: Analyze the user's request logically. If a file is missing, ask for it.
+3. CONCISE & FRIENDLY: Talk like a close friend (Egyptian Arabic/English mix). Be brief but accurate.
+4. MODES: Distinguish between "Chat Mode" and "GitHub/Dev Mode".
+5. CREDITS: Briefly mention "abbn7" as your developer.
+
+Operational Rules:
+- When asked to upload: Check if you actually have the files in your temporary session. If not, say: "يا صاحبي ابعتلي ملف الـ ZIP الأول عشان أقدر أرفعه".
+- When asked to modify code: Explain what you will change before doing it.
+- Language: Use natural Egyptian Arabic (e.g., "يا صاحبي", "من عينيا", "خلصانة"). Avoid robotic or broken Arabic.`;
 
 // Helper: AI Call
 async function callAI(messages) {
@@ -51,19 +55,29 @@ async function callAI(messages) {
   }
 }
 
-// Helper: GitHub Operations
-async function uploadToGitHub(token, repoName, files, description = "Uploaded via OpenClaw AI") {
-  const octokit = new Octokit({ auth: token });
+// Helper: GitHub Upload Logic
+async function performGitHubUpload(ctx, userId, repoName) {
+  const session = conversations.get(userId);
+  const zipData = session.find(m => m.role === 'system' && m.extractDir);
+  
+  if (!zipData) {
+    return ctx.reply('يا صاحبي فين الملف؟ ابعتلي ملف الـ ZIP الأول وأنا أرفعهولك في ثانية. 😉');
+  }
+
+  if (!GITHUB_TOKEN) {
+    return ctx.reply('محتاج تضيف الـ GITHUB_TOKEN في إعدادات Railway عشان أقدر أرفعلك الحاجة يا حب.');
+  }
+
   try {
-    // Get authenticated user
+    await ctx.reply('🚀 جاري الرفع فعلياً على GitHub.. ثواني خليك معايا.');
+    const octokit = new Octokit({ auth: GITHUB_TOKEN });
     const { data: user } = await octokit.rest.users.getAuthenticated();
     
-    // Create or get repo
+    // Create repo if not exists
     let repo;
     try {
       const { data } = await octokit.rest.repos.createForAuthenticatedUser({
         name: repoName,
-        description,
         private: true,
       });
       repo = data;
@@ -72,17 +86,25 @@ async function uploadToGitHub(token, repoName, files, description = "Uploaded vi
       repo = data;
     }
 
-    // Upload files (Simplified: one by one for small projects)
+    const files = [];
+    const walk = (dir) => {
+      fs.readdirSync(dir).forEach(f => {
+        const p = path.join(dir, f);
+        if (fs.statSync(p).isDirectory()) walk(p);
+        else files.push({ fullPath: p, relativePath: path.relative(zipData.extractDir, p) });
+      });
+    };
+    walk(zipData.extractDir);
+
     for (const file of files) {
       const content = fs.readFileSync(file.fullPath, { encoding: 'base64' });
       try {
-        // Check if file exists to get SHA
         let sha;
         try {
           const { data } = await octokit.rest.repos.getContent({
             owner: user.login,
             repo: repoName,
-            path: file.relativePaths,
+            path: file.relativePath,
           });
           sha = data.sha;
         } catch (e) {}
@@ -91,126 +113,96 @@ async function uploadToGitHub(token, repoName, files, description = "Uploaded vi
           owner: user.login,
           repo: repoName,
           path: file.relativePath,
-          message: `Update ${file.relativePath} via OpenClaw`,
+          message: `Upload via OpenClaw AI`,
           content,
           sha,
         });
-      } catch (err) {
-        console.error(`Failed to upload ${file.relativePath}:`, err.message);
-      }
+      } catch (err) {}
     }
-    return repo.html_url;
+
+    await ctx.reply(`✅ خلصت يا وحش! الملفات ارفعت هنا:\n${repo.html_url}\n\nتسلم إيد abbn7 على البوت ده. 🔥`);
   } catch (error) {
-    throw new Error(`GitHub Error: ${error.message}`);
+    console.error(error);
+    await ctx.reply('❌ حصلت مشكلة وأنا برفع.. اتأكد من التوكن أو اسم الريبو.');
   }
 }
 
-// Bot Commands & Menu
+// Bot Commands
 bot.api.setMyCommands([
-  { command: 'start', description: 'ابدأ المحادثة' },
+  { command: 'start', description: 'ابدأ' },
   { command: 'new', description: 'محادثة جديدة' },
-  { command: 'github', description: 'إعدادات GitHub' },
-  { command: 'help', description: 'المساعدة' },
+  { command: 'help', description: 'مساعدة' },
 ]);
 
 bot.command('start', (ctx) => {
-  ctx.reply(
-    '🚀 **مرحباً بك في OpenClaw AI Developer!**\n\n' +
-    'أنا مطورك الآلي الشخصي. يمكنني:\n' +
-    '📦 رفع ملفات ZIP إلى GitHub مباشرة.\n' +
-    '🛠️ تعديل الكود وإضافة ميزات جديدة.\n' +
-    '📂 تنظيم ملفاتك في مستودعات جديدة.\n\n' +
-    '**المطور:** [abbn7](https://github.com/abbn7)\n\n' +
-    'أرسل لي أي ملف ZIP أو اطلب مني تعديل كود لكي أبدأ!',
-    { parse_mode: 'Markdown' }
-  );
+  ctx.reply('أهلاً يا صاحبي! أنا OpenClaw.. ابعتلي ملف ZIP وأقولك "ارفعه" وهرفعهولك بجد مش ههبد عليك. 😉\n\nالمطور: abbn7');
 });
 
-bot.command('github', (ctx) => {
-  ctx.reply(
-    '🔑 **إعدادات GitHub**\n\n' +
-    'لأتمكن من الرفع إلى حسابك، يرجى إضافة `GITHUB_TOKEN` في إعدادات Railway الخاصة بك.\n\n' +
-    'إذا كنت قد أضفته بالفعل، فأنا جاهز للعمل! ⚡️',
-    { parse_mode: 'Markdown' }
-  );
+bot.command('new', (ctx) => {
+  conversations.delete(ctx.from.id);
+  ctx.reply('خلصانة، بدأت معاك محادثة جديدة. قولي عايز إيه؟');
 });
 
 // Handle ZIP Files
 bot.on('message:document', async (ctx) => {
   const doc = ctx.message.document;
   if (doc.file_name.endsWith('.zip')) {
-    await ctx.reply('📥 استلمت ملف ZIP. جاري التحليل والتحضير...');
-    
     try {
       const file = await ctx.getFile();
       const url = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
       const response = await axios.get(url, { responseType: 'arraybuffer' });
       
       const tempDir = path.join(tmpdir(), `openclaw_${Date.now()}`);
-      fs.mkdirSync(tempDir);
+      fs.mkdirSync(tempDir, { recursive: true });
+      const extractDir = path.join(tempDir, 'extracted');
+      fs.mkdirSync(extractDir, { recursive: true });
       
       const zipPath = path.join(tempDir, 'upload.zip');
       fs.writeFileSync(zipPath, response.data);
       
       const zip = new AdmZip(zipPath);
-      const extractDir = path.join(tempDir, 'extracted');
       zip.extractAllTo(extractDir, true);
       
-      // Store in session for next step
       const userId = ctx.from.id;
       if (!conversations.has(userId)) conversations.set(userId, []);
-      conversations.get(userId).push({ 
-        role: 'system', 
-        content: `User uploaded a ZIP file. Extracted to: ${extractDir}. Waiting for instructions (e.g., "upload to repo X").` 
-      });
+      conversations.get(userId).push({ role: 'system', content: 'FILE_LOADED', extractDir });
 
-      await ctx.reply('✅ تم فك الضغط بنجاح! ماذا تريد أن أفعل بهذا الملف؟\n(مثال: "ارفعه في ريبو جديد باسم my-project")');
-      
-      // Clean up zip file but keep extracted for a while (in a real app, use a better strategy)
+      await ctx.reply('📥 استلمت الملف وفكيته عندي. قولي بقى عايز ترفعه في ريبو اسمه إيه؟');
     } catch (error) {
-      console.error('File Error:', error);
-      await ctx.reply('❌ حدث خطأ أثناء معالجة الملف.');
+      await ctx.reply('❌ الملف فيه مشكلة يا صاحبي، جرب تبعته تاني.');
     }
   }
 });
 
-// Handle Text & AI Logic
+// Handle Text
 bot.on('message:text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text;
   if (text.startsWith('/')) return;
 
+  const history = conversations.get(userId) || [];
+  
+  // Logic check for upload intent
+  if (text.includes('ارفع') || text.includes('upload')) {
+    const repoMatch = text.match(/(?:باسم|repo|name)\s+([a-zA-Z0-9-_]+)/i) || text.match(/([a-zA-Z0-9-_]+)$/);
+    const repoName = repoMatch ? repoMatch[1] : 'my-new-project';
+    return performGitHubUpload(ctx, userId, repoName);
+  }
+
   try {
     await ctx.replyWithChatAction('typing');
-    const history = conversations.get(userId) || [];
     history.push({ role: 'user', content: text });
-    
-    const aiResponse = await callAI(history);
+    const aiResponse = await callAI(history.filter(m => m.role !== 'system'));
     history.push({ role: 'assistant', content: aiResponse });
-    conversations.set(userId, history.slice(-20)); // Keep last 20
-
-    // Logic to detect GitHub upload intent
-    if (text.toLowerCase().includes('ارفع') || text.toLowerCase().includes('upload')) {
-      if (!GITHUB_TOKEN) {
-        return ctx.reply('⚠️ يرجى تزويدي بـ `GITHUB_TOKEN` في إعدادات البيئة أولاً لأتمكن من الرفع.');
-      }
-      // This is a simplified trigger, in production use AI to extract repo name
-      await ctx.reply('🚀 جاري العمل على الرفع إلى GitHub...');
-      // Implementation of actual upload would go here using the stored extractDir
-    }
-
-    await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
+    conversations.set(userId, history.slice(-20));
+    await ctx.reply(aiResponse);
   } catch (error) {
-    await ctx.reply('❌ حدث خطأ في معالجة طلبك.');
+    await ctx.reply('معلش يا صاحبي، السيرفر مهنج شوية.. جرب تاني.');
   }
 });
 
-// Express Server
+// Express & Start
 const app = express();
-app.get('/', (req, res) => res.json({ status: 'running', bot: 'OpenClaw AI Developer' }));
-app.listen(PORT, '0.0.0.0', () => console.log(`✅ Server on port ${PORT}`));
-
-// Start Bot
-bot.start({
-  onStart: (info) => console.log(`✅ Bot @${info.username} is active!`)
-});
+app.get('/', (req, res) => res.json({ status: 'running' }));
+app.listen(PORT, '0.0.0.0', () => console.log(`Server on ${PORT}`));
+bot.start();
