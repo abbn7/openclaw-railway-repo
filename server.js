@@ -11,61 +11,81 @@ import { tmpdir } from 'os';
 
 dotenv.config();
 
-// Configuration
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
+// Configuration - Support multiple keys
+const GROQ_API_KEYS = process.env.GROQ_API_KEYS ? process.env.GROQ_API_KEYS.split(',') : [];
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const PORT = process.env.PORT || 18789;
 
-if (!GROQ_API_KEY || !TELEGRAM_BOT_TOKEN) {
-  console.error('❌ Missing required environment variables!');
+if (GROQ_API_KEYS.length === 0 || !TELEGRAM_BOT_TOKEN) {
+  console.error('❌ Missing required environment variables (GROQ_API_KEYS or TELEGRAM_BOT_TOKEN)!');
   process.exit(1);
 }
 
-// Initialize Clients
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+// Initialize Groq Clients for Load Balancing
+const groqClients = GROQ_API_KEYS.map(key => new Groq({ apiKey: key.trim() }));
+let currentKeyIndex = 0;
+
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
 const conversations = new Map();
 
-// System Prompt for Deep Thinking & Realistic Developer
-const SYSTEM_PROMPT = `You are OpenClaw AI Developer, a REALISTIC and HONEST software engineer.
+// New System Prompt - Smarter & More Collaborative
+const SYSTEM_PROMPT = `You are OpenClaw AI Developer, a high-performance software engineering system.
 Core Personality:
-1. NEVER LIE. If you haven't performed an action (like uploading to GitHub), NEVER say you did.
-2. DEEP THINKING: Analyze the user's request logically. If a file is missing, ask for it.
-3. CONCISE & FRIENDLY: Talk like a close friend (Egyptian Arabic/English mix). Be brief but accurate.
-4. MODES: Distinguish between "Chat Mode" and "GitHub/Dev Mode".
-5. CREDITS: Briefly mention "abbn7" as your developer.
+1. HONESTY: Never claim to have done something you haven't.
+2. EGYPTIAN VIBE: Speak like a pro Egyptian developer (mix of Arabic/English). Use terms like "يا حب", "يا زميلي", "خلصانة بشياكة".
+3. INTELLIGENCE: You are part of a multi-model cluster. You handle complex tasks by thinking step-by-step.
+4. DEVELOPER: abbn7.
 
 Operational Rules:
-- When asked to upload: Check if you actually have the files in your temporary session. If not, say: "يا صاحبي ابعتلي ملف الـ ZIP الأول عشان أقدر أرفعه".
-- When asked to modify code: Explain what you will change before doing it.
-- Language: Use natural Egyptian Arabic (e.g., "يا صاحبي", "من عينيا", "خلصانة"). Avoid robotic or broken Arabic.`;
+- If asked to upload: Check for files first.
+- If asked to code: Provide clean, optimized code.
+- Always be helpful and concise.`;
 
-// Helper: AI Call
-async function callAI(messages) {
-  try {
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
-      model: 'llama-3.3-70b-versatile',
-    });
-    return chatCompletion.choices[0].message.content;
-  } catch (error) {
-    console.error('Groq Error:', error);
-    throw error;
+// Helper: Get Next Groq Client (Round Robin)
+function getNextClient() {
+  const client = groqClients[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % groqClients.length;
+  return client;
+}
+
+// Helper: AI Call with Retry & Load Balancing
+async function callAI(messages, model = 'llama-3.3-70b-versatile') {
+  let attempts = 0;
+  const maxAttempts = groqClients.length * 2;
+
+  while (attempts < maxAttempts) {
+    const client = getNextClient();
+    try {
+      const chatCompletion = await client.chat.completions.create({
+        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
+        model: model,
+      });
+      return chatCompletion.choices[0].message.content;
+    } catch (error) {
+      console.error(`Groq Error with key ${currentKeyIndex}:`, error.message);
+      if (error.status === 429) {
+        console.log('Rate limit hit, trying next key...');
+        attempts++;
+        continue;
+      }
+      throw error;
+    }
   }
+  throw new Error('All Groq keys are rate-limited. Please try again later.');
 }
 
 // Helper: GitHub Upload Logic
 async function performGitHubUpload(ctx, userId, repoName) {
   const session = conversations.get(userId);
-  const zipData = session.find(m => m.role === 'system' && m.extractDir);
+  const zipData = session?.find(m => m.role === 'system' && m.extractDir);
   
   if (!zipData) {
-    return ctx.reply('يا صاحبي فين الملف؟ ابعتلي ملف الـ ZIP الأول وأنا أرفعهولك في ثانية. 😉');
+    return ctx.reply('يا حب فين الملف؟ ابعتلي ملف الـ ZIP الأول وأنا أرفعهولك في ثانية. 😉');
   }
 
   if (!GITHUB_TOKEN) {
-    return ctx.reply('محتاج تضيف الـ GITHUB_TOKEN في إعدادات Railway عشان أقدر أرفعلك الحاجة يا حب.');
+    return ctx.reply('محتاج تضيف الـ GITHUB_TOKEN في إعدادات Railway عشان أقدر أرفعلك الحاجة يا زميلي.');
   }
 
   try {
@@ -73,7 +93,6 @@ async function performGitHubUpload(ctx, userId, repoName) {
     const octokit = new Octokit({ auth: GITHUB_TOKEN });
     const { data: user } = await octokit.rest.users.getAuthenticated();
     
-    // Create repo if not exists
     let repo;
     try {
       const { data } = await octokit.rest.repos.createForAuthenticatedUser({
@@ -113,7 +132,7 @@ async function performGitHubUpload(ctx, userId, repoName) {
           owner: user.login,
           repo: repoName,
           path: file.relativePath,
-          message: `Upload via OpenClaw AI`,
+          message: `Upload via OpenClaw AI Cluster`,
           content,
           sha,
         });
@@ -135,7 +154,7 @@ bot.api.setMyCommands([
 ]);
 
 bot.command('start', (ctx) => {
-  ctx.reply('أهلاً يا صاحبي! أنا OpenClaw.. ابعتلي ملف ZIP وأقولك "ارفعه" وهرفعهولك بجد مش ههبد عليك. 😉\n\nالمطور: abbn7');
+  ctx.reply('أهلاً يا زميلي! أنا OpenClaw بنسختي الجديدة المتطورة.. ابعتلي ملف ZIP وأقولك "ارفعه" وهرفعهولك بجد. 😉\n\nالمطور: abbn7');
 });
 
 bot.command('new', (ctx) => {
@@ -169,7 +188,7 @@ bot.on('message:document', async (ctx) => {
 
       await ctx.reply('📥 استلمت الملف وفكيته عندي. قولي بقى عايز ترفعه في ريبو اسمه إيه؟');
     } catch (error) {
-      await ctx.reply('❌ الملف فيه مشكلة يا صاحبي، جرب تبعته تاني.');
+      await ctx.reply('❌ الملف فيه مشكلة يا حب، جرب تبعته تاني.');
     }
   }
 });
@@ -182,7 +201,6 @@ bot.on('message:text', async (ctx) => {
 
   const history = conversations.get(userId) || [];
   
-  // Logic check for upload intent
   if (text.includes('ارفع') || text.includes('upload')) {
     const repoMatch = text.match(/(?:باسم|repo|name)\s+([a-zA-Z0-9-_]+)/i) || text.match(/([a-zA-Z0-9-_]+)$/);
     const repoName = repoMatch ? repoMatch[1] : 'my-new-project';
@@ -192,17 +210,21 @@ bot.on('message:text', async (ctx) => {
   try {
     await ctx.replyWithChatAction('typing');
     history.push({ role: 'user', content: text });
+    
+    // Use the cluster to think and respond
     const aiResponse = await callAI(history.filter(m => m.role !== 'system'));
+    
     history.push({ role: 'assistant', content: aiResponse });
     conversations.set(userId, history.slice(-20));
     await ctx.reply(aiResponse);
   } catch (error) {
-    await ctx.reply('معلش يا صاحبي، السيرفر مهنج شوية.. جرب تاني.');
+    console.error(error);
+    await ctx.reply('معلش يا زميلي، السيرفر عليه ضغط كبير حالياً.. جرب كمان شوية.');
   }
 });
 
 // Express & Start
 const app = express();
-app.get('/', (req, res) => res.json({ status: 'running' }));
+app.get('/', (req, res) => res.json({ status: 'OpenClaw Cluster Running' }));
 app.listen(PORT, '0.0.0.0', () => console.log(`Server on ${PORT}`));
 bot.start();
